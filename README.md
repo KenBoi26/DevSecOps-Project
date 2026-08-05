@@ -1,190 +1,191 @@
-<div align="center">
-  <img src="./public/assets/DevSecOps.png" alt="Logo" width="100%" height="100%">
+# DevSecOps Project — Netflix Clone CI/CD Pipeline
 
-  <br>
-  <a href="http://netflix-clone-with-tmdb-using-react-mui.vercel.app/">
-    <img src="./public/assets/netflix-logo.png" alt="Logo" width="100" height="32">
-  </a>
-</div>
+A full DevSecOps pipeline deploying a Netflix clone to AWS, covering CI/CD, security scanning, monitoring, and GitOps-based Kubernetes deployment.
 
-<br />
+Based on the [N4si/DevSecOps-Project](https://github.com/N4si/DevSecOps-Project) tutorial by **cloudchamp** (originally published 2023). This README documents the **as-built, 2026-updated** version of that project — every phase includes the original tutorial's approach alongside what actually had to change to work with current tool versions, and why.
 
-<div align="center">
-  <img src="./public/assets/home-page.png" alt="Logo" width="100%" height="100%">
-  <p align="center">Home Page</p>
-</div>
+> **Why this matters:** a tutorial frozen in 2023 assumes a set of software versions, API policies, and vendor behaviors that have since moved on. Getting this project working end-to-end in 2026 meant diagnosing and fixing that drift at nearly every phase — which is itself a core DevOps skill, arguably more representative of real work than following instructions that still match reality. See [Lessons Learned](#lessons-learned--version-drift) at the end.
 
-# **Youtube Video for step by step Demonstration!**
-[![Video Tutorial](https://img.youtube.com/vi/g8X5AoqCJHc/0.jpg)](https://youtu.be/g8X5AoqCJHc)
+---
 
+## Architecture Overview
 
-## Susbcribe:
-[https://www.youtube.com/@cloudchamp?
-](https://www.youtube.com/@cloudchamp?sub_confirmation=1)
+- **App**: Netflix clone (React/TypeScript/Vite), containerized with Docker
+- **CI/CD**: Jenkins pipeline — clean → checkout → SonarQube scan → quality gate → dependency install → OWASP dependency check → Trivy filesystem scan → Docker build & push → Trivy image scan → deploy
+- **Security**: SonarQube (code quality/security), Trivy (filesystem + image vulnerability scanning), OWASP Dependency-Check (known CVEs in dependencies)
+- **Monitoring**: Prometheus + Node Exporter (host + Jenkins metrics), Grafana (dashboards)
+- **GitOps/Orchestration**: AWS EKS (via `eksctl`), ArgoCD (declarative sync from Git), Helm (in-cluster Node Exporter)
+- **Infra**: Two EC2 instances — `netflix-jenkins` (Jenkins, Docker, SonarQube) and `Monitoring` (Prometheus, Grafana, Node Exporter) — plus a separately provisioned EKS cluster (different VPC from both — see Phase 6)
 
-# Deploy Netflix Clone on Cloud using Jenkins - DevSecOps Project!
+---
 
-### **Phase 1: Initial Setup and Deployment**
+## Phase 1: Initial Setup and Deployment
 
-**Step 1: Launch EC2 (Ubuntu 22.04):**
+### Original approach
+Launch an Ubuntu 22.04 EC2 instance, clone the repo, install Docker, build/run the container, then get a TMDB API key and rebuild with it as a build arg.
 
-- Provision an EC2 instance on AWS with Ubuntu 22.04.
-- Connect to the instance using SSH.
+### What changed
+Nothing fundamentally — this phase held up well. The only practical addition: verify Docker Compose/daemon behavior hasn't changed on newer Ubuntu, and be deliberate about attaching an **Elastic IP** early, since every subsequent phase (Jenkins, SonarQube, Prometheus, Grafana, the app itself) is accessed by public IP, and losing that IP on every stop/start is a real workflow cost.
 
-**Step 2: Clone the Code:**
+### Commands
 
-- Update all the packages and then clone the code.
-- Clone your application's code repository onto the EC2 instance:
-    
-    ```bash
-    git clone https://github.com/N4si/DevSecOps-Project.git
-    ```
-    
+```bash
+# Launch Ubuntu 22.04 (or 24.04) EC2, attach an Elastic IP, SSH in
+git clone https://github.com/<your-username>/DevSecOps-Project.git
+cd DevSecOps-Project
 
-**Step 3: Install Docker and Run the App Using a Container:**
+sudo apt-get update
+sudo apt-get install docker.io -y
+sudo usermod -aG docker $USER
+newgrp docker
+sudo chmod 777 /var/run/docker.sock
 
-- Set up Docker on the EC2 instance:
-    
-    ```bash
-    
-    sudo apt-get update
-    sudo apt-get install docker.io -y
-    sudo usermod -aG docker $USER  # Replace with your system's username, e.g., 'ubuntu'
-    newgrp docker
-    sudo chmod 777 /var/run/docker.sock
-    ```
-    
-- Build and run your application using Docker containers:
-    
-    ```bash
-    docker build -t netflix .
-    docker run -d --name netflix -p 8081:80 netflix:latest
-    
-    #to delete
-    docker stop <containerid>
-    docker rmi -f netflix
-    ```
-
-It will show an error cause you need API key
-
-**Step 4: Get the API Key:**
-
-- Open a web browser and navigate to TMDB (The Movie Database) website.
-- Click on "Login" and create an account.
-- Once logged in, go to your profile and select "Settings."
-- Click on "API" from the left-side panel.
-- Create a new API key by clicking "Create" and accepting the terms and conditions.
-- Provide the required basic details and click "Submit."
-- You will receive your TMDB API key.
-
-Now recreate the Docker image with your api key:
+docker build -t netflix .
+docker run -d --name netflix -p 8081:80 netflix:latest
+# Fails without an API key — expected at this point
 ```
+
+Get a TMDB API key (themoviedb.org → Settings → API), then rebuild:
+
+```bash
 docker build --build-arg TMDB_V3_API_KEY=<your-api-key> -t netflix .
 ```
 
-**Phase 2: Security**
+### Troubleshooting notes
+- **App loads but data won't fetch ("failed to load")**: this can be a local network issue on *your* end, not the server — some ISPs/networks block or throttle `api.themoviedb.org`. If the container is healthy and the key is valid, try the page over a VPN before assuming the deployment is broken.
 
-1. **Install SonarQube and Trivy:**
-    - Install SonarQube and Trivy on the EC2 instance to scan for vulnerabilities.
-        
-        sonarqube
-        ```
-        docker run -d --name sonar -p 9000:9000 sonarqube:lts-community
-        ```
-        
-        
-        To access: 
-        
-        publicIP:9000 (by default username & password is admin)
-        
-        To install Trivy:
-        ```
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
-        sudo apt-get update
-        sudo apt-get install trivy        
-        ```
-        
-        to scan image using trivy
-        ```
-        trivy image <imageid>
-        ```
-        
-        
-2. **Integrate SonarQube and Configure:**
-    - Integrate SonarQube with your CI/CD pipeline.
-    - Configure SonarQube to analyze code for quality and security issues.
+---
 
-**Phase 3: CI/CD Setup**
+## Phase 2: Security — SonarQube and Trivy
 
-1. **Install Jenkins for Automation:**
-    - Install Jenkins on the EC2 instance to automate deployment:
-    Install Java
-    
-    ```bash
-    sudo apt update
-    sudo apt install fontconfig openjdk-17-jre
-    java -version
-    openjdk version "17.0.8" 2023-07-18
-    OpenJDK Runtime Environment (build 17.0.8+7-Debian-1deb12u1)
-    OpenJDK 64-Bit Server VM (build 17.0.8+7-Debian-1deb12u1, mixed mode, sharing)
-    
-    #jenkins
-    sudo wget -O /usr/share/keyrings/jenkins-keyring.asc \
-    https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-    echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
-    https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
-    /etc/apt/sources.list.d/jenkins.list > /dev/null
-    sudo apt-get update
-    sudo apt-get install jenkins
-    sudo systemctl start jenkins
-    sudo systemctl enable jenkins
-    ```
-    
-    - Access Jenkins in a web browser using the public IP of your EC2 instance.
-        
-        publicIp:8080
-        
-2. **Install Necessary Plugins in Jenkins:**
+### Original approach
+Run SonarQube as a container, install Trivy via `apt-key add` and a static repo definition.
 
-Goto Manage Jenkins →Plugins → Available Plugins →
+### What changed
+1. **`apt-key add` is deprecated** on current Ubuntu — it's ignored or throws warnings, breaking the repo signing chain. Replaced with the modern `signed-by` + `gpg --dearmor` pattern.
+2. **Trivy's repo domain and install path changed** (`get.trivy.dev` is now the canonical source; the old `aquasecurity.github.io/trivy-repo` mirror still works but current docs point elsewhere).
+3. **Supply-chain incident awareness**: Trivy versions v0.69.4–v0.69.6 were affected by a credential-stealing compromise (CVE-2026-33634) discovered in March 2026. Always **pin an explicit safe version** rather than installing "latest" blindly.
+4. **SonarQube's `vm.max_map_count` kernel parameter** isn't set by default on a fresh EC2 instance and isn't obvious from the container logs alone — this causes the container to exit shortly after starting.
 
-Install below plugins
+### Commands
 
-1 Eclipse Temurin Installer (Install without restart)
+```bash
+docker run -d --name sonar -p 9000:9000 sonarqube:lts-community
+# Access: http://<public-ip>:9000  (default admin/admin, forces password change)
+```
 
-2 SonarQube Scanner (Install without restart)
+If the container exits shortly after starting, check `docker logs sonar` for a `max_map_count` complaint, then:
 
-3 NodeJs Plugin (Install Without restart)
+```bash
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
+```
 
-4 Email Extension Plugin
+Installing Trivy (updated method):
 
-### **Configure Java and Nodejs in Global Tool Configuration**
+```bash
+sudo apt-get install -y wget apt-transport-https gnupg
+wget -qO - https://get.trivy.dev/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://get.trivy.dev/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+sudo apt-get update
+sudo apt-get install -y trivy=0.71.0   # pin explicitly — don't install "latest" blindly
+trivy --version
+```
 
-Goto Manage Jenkins → Tools → Install JDK(17) and NodeJs(16)→ Click on Apply and Save
+### Troubleshooting notes
+- **SonarQube container exits immediately / restarts in a loop** → almost always `vm.max_map_count`. Fix on the **host**, not inside the container.
+- **`libatomic.so.1: cannot open shared object file`** during SonarQube's TypeScript/JS sensor (surfaces later, during the Jenkins pipeline run) → install `libatomic1` on the Jenkins host:
+  ```bash
+  sudo apt-get install -y libatomic1
+  ```
+  Without this, SonarQube's scan still reports `ANALYSIS SUCCESSFUL` overall, but silently skips TypeScript/JS analysis — an easy false sense of completeness.
 
+---
 
-### SonarQube
+## Phase 3: CI/CD Setup — Jenkins
 
-Create the token
+This is where the tutorial's version drift hits hardest.
 
-Goto Jenkins Dashboard → Manage Jenkins → Credentials → Add Secret Text. It should look like this
+### Original approach
+Install OpenJDK 17, add Jenkins's `jenkins.io-2023.key` GPG key, install Jenkins, install a handful of plugins, configure Global Tool Configuration with JDK 17 and Node 16, wire up SonarQube, and build out the pipeline stage-by-stage (SonarQube analysis → quality gate → OWASP → Trivy FS scan → Docker build/push → Trivy image scan → deploy).
 
-After adding sonar token
+### What changed, and why
 
-Click on Apply and Save
+| Issue | Root cause | Fix |
+|---|---|---|
+| Jenkins fails to start / crashes | Current Jenkins LTS requires **Java 17 or 21** — Java 11 (once acceptable) is no longer sufficient | Install OpenJDK 21 *before* Jenkins, confirm with `java -version` |
+| `apt-get update` fails with signature errors on the Jenkins repo | The `jenkins.io-2023.key` GPG key has rotated; current key is year-specific and changes periodically | Use the current year's key path, e.g. `jenkins.io-2026.key` |
+| `yarn install` fails inside Docker build: `node-releases@2.0.51 ... Expected version ">=18"` | Node 16 reached EOL; downstream npm packages have raised their minimum engine requirement | Bump the **Dockerfile's** base image from `node:16.17.0-alpine` to `node:20-alpine` (this is a code change to the repo itself, not a Jenkins config change) |
+| `waitForQualityGate` hangs forever on `PENDING` | SonarQube's quality gate result is delivered via **webhook**, not polling — if none exists, Jenkins waits indefinitely | Create a SonarQube webhook pointing at Jenkins's private IP (not `localhost`, not necessarily the public IP if both run on the same host) |
+| OWASP Dependency-Check fails: `Invalid API Key, length of 0` | NVD now requires a free API key for any sustained access to its CVE feed; unauthenticated requests are throttled into failure | Register for a free NVD API key, pass it via `--nvdApiKey`, store it as a Jenkins Secret Text credential rather than hardcoding it |
+| First OWASP scan takes 15–30+ minutes | First run downloads the full NVD database; subsequent runs are incremental and much faster | Not a bug — budget the time on first run only |
+| `docker login` fails: `unauthorized: incorrect username or password` | Docker Hub no longer accepts account passwords for CLI/API logins | Generate a **Personal Access Token** and use it as the credential's password (username stays your account username) |
+| `docker push` fails: `authentication required - access token has insufficient scopes` / `push access denied` | PAT was created with Read-only scope, or the target repo doesn't exist yet under your namespace | Regenerate the PAT with **Read & Write** access; also create the target repo on Docker Hub manually if push-to-create isn't permitted on your account tier |
+| `docker run` fails on redeploy: port already allocated | No cleanup step before redeploying to the same host port | Add `docker stop`/`docker rm` (with `|| true` to tolerate first-run absence) before the final `docker run` |
 
-**The Configure System option** is used in Jenkins to configure different server
+### Commands
 
-**Global Tool Configuration** is used to configure different tools that we install using Plugins
+**Java + Jenkins install:**
 
-We will install a sonar scanner in the tools.
+```bash
+sudo apt update
+sudo apt install -y fontconfig openjdk-21-jre-headless
+java -version   # confirm 21.x.x (17.x.x also acceptable)
 
-Create a Jenkins webhook
+sudo wget -O /etc/apt/keyrings/jenkins-keyring.asc \
+  https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] \
+https://pkg.jenkins.io/debian-stable binary/" | sudo tee \
+/etc/apt/sources.list.d/jenkins.list > /dev/null
 
-1. **Configure CI/CD Pipeline in Jenkins:**
-- Create a CI/CD pipeline in Jenkins to automate your application deployment.
+sudo apt-get update
+sudo apt-get install -y jenkins
+sudo systemctl start jenkins
+sudo systemctl enable jenkins
+sudo systemctl status jenkins   # confirm "active (running)"
+```
+
+Access at `http://<public-ip>:8080`, unlock with:
+```bash
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+
+**Plugins** (Manage Jenkins → Plugins → Available):
+- Eclipse Temurin Installer
+- SonarQube Scanner
+- NodeJS Plugin
+- Email Extension Plugin
+- Docker, Docker Commons, Docker Pipeline, Docker API, docker-build-step
+- OWASP Dependency-Check
+
+**Global Tool Configuration:**
+- JDK — Name: `jdk17` (label only, doesn't need to match the real version) → Version: **21**
+- NodeJS — Name: `node16` (label only) → Version: **18 or 20** (Node 16 is EOL and may not even be selectable)
+- OWASP Dependency-Check — Name: `DP-Check`
+
+> **Note on tool names:** the name field is just a string label Jenkins looks up against `tools { jdk 'jdk17' }` / `nodejs 'node16'` in the Jenkinsfile — it does not need to match the actual installed version. Keep the names as-is and just point them at current versions underneath, rather than editing the pipeline.
+
+**SonarQube integration:**
+- Generate a token: SonarQube → My Account → Security
+- Jenkins → Manage Jenkins → Credentials → Add Secret Text (the token)
+- Manage Jenkins → System → SonarQube servers → add server (`sonar-server`), point at `http://localhost:9000` (if SonarQube's container port is mapped to the host)
+- **Critical**: SonarQube → Administration → Configuration → Webhooks → Create → URL: `http://<jenkins-private-ip>:8080/sonarqube-webhook/`
+
+**Docker Hub credentials:**
+- Manage Jenkins → Credentials → Add Credentials → **Username with password** (not Secret Text) → Username: your Docker Hub username, Password: your **PAT with Read & Write scope** → ID: `docker`
+
+**GitHub webhook** (for auto-triggering builds on push):
+- GitHub repo → Settings → Webhooks → Add webhook
+  - Payload URL: `http://<jenkins-public-ip>:8080/github-webhook/`
+  - Content type: `application/x-www-form-urlencoded`
+  - Events: Just the push event
+- Jenkins job → Configure → Build Triggers → check **"GitHub hook trigger for GITScm polling"**
+
+**NVD API key as a credential:**
+- Get a free key: https://nvd.nist.gov/developers/request-an-api-key
+- Jenkins → Manage Jenkins → Credentials → Add Credentials → **Secret text** → ID: `nvd-api-key`
+
+**Full Jenkinsfile:**
 
 ```groovy
 pipeline {
@@ -204,10 +205,10 @@ pipeline {
         }
         stage('Checkout from Git') {
             steps {
-                git branch: 'main', url: 'https://github.com/N4si/DevSecOps-Project.git'
+                git branch: 'main', url: 'https://github.com/<your-username>/DevSecOps-Project.git'
             }
         }
-        stage("Sonarqube Analysis") {
+        stage('Sonarqube Analysis') {
             steps {
                 withSonarQubeEnv('sonar-server') {
                     sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
@@ -215,7 +216,7 @@ pipeline {
                 }
             }
         }
-        stage("quality gate") {
+        stage('quality gate') {
             steps {
                 script {
                     waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
@@ -227,99 +228,11 @@ pipeline {
                 sh "npm install"
             }
         }
-    }
-}
-```
-
-Certainly, here are the instructions without step numbers:
-
-**Install Dependency-Check and Docker Tools in Jenkins**
-
-**Install Dependency-Check Plugin:**
-
-- Go to "Dashboard" in your Jenkins web interface.
-- Navigate to "Manage Jenkins" → "Manage Plugins."
-- Click on the "Available" tab and search for "OWASP Dependency-Check."
-- Check the checkbox for "OWASP Dependency-Check" and click on the "Install without restart" button.
-
-**Configure Dependency-Check Tool:**
-
-- After installing the Dependency-Check plugin, you need to configure the tool.
-- Go to "Dashboard" → "Manage Jenkins" → "Global Tool Configuration."
-- Find the section for "OWASP Dependency-Check."
-- Add the tool's name, e.g., "DP-Check."
-- Save your settings.
-
-**Install Docker Tools and Docker Plugins:**
-
-- Go to "Dashboard" in your Jenkins web interface.
-- Navigate to "Manage Jenkins" → "Manage Plugins."
-- Click on the "Available" tab and search for "Docker."
-- Check the following Docker-related plugins:
-  - Docker
-  - Docker Commons
-  - Docker Pipeline
-  - Docker API
-  - docker-build-step
-- Click on the "Install without restart" button to install these plugins.
-
-**Add DockerHub Credentials:**
-
-- To securely handle DockerHub credentials in your Jenkins pipeline, follow these steps:
-  - Go to "Dashboard" → "Manage Jenkins" → "Manage Credentials."
-  - Click on "System" and then "Global credentials (unrestricted)."
-  - Click on "Add Credentials" on the left side.
-  - Choose "Secret text" as the kind of credentials.
-  - Enter your DockerHub credentials (Username and Password) and give the credentials an ID (e.g., "docker").
-  - Click "OK" to save your DockerHub credentials.
-
-Now, you have installed the Dependency-Check plugin, configured the tool, and added Docker-related plugins along with your DockerHub credentials in Jenkins. You can now proceed with configuring your Jenkins pipeline to include these tools and credentials in your CI/CD process.
-
-```groovy
-
-pipeline{
-    agent any
-    tools{
-        jdk 'jdk17'
-        nodejs 'node16'
-    }
-    environment {
-        SCANNER_HOME=tool 'sonar-scanner'
-    }
-    stages {
-        stage('clean workspace'){
-            steps{
-                cleanWs()
-            }
-        }
-        stage('Checkout from Git'){
-            steps{
-                git branch: 'main', url: 'https://github.com/N4si/DevSecOps-Project.git'
-            }
-        }
-        stage("Sonarqube Analysis "){
-            steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
-                    -Dsonar.projectKey=Netflix '''
-                }
-            }
-        }
-        stage("quality gate"){
-           steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
-                }
-            } 
-        }
-        stage('Install Dependencies') {
-            steps {
-                sh "npm install"
-            }
-        }
         stage('OWASP FS SCAN') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_KEY')]) {
+                    dependencyCheck additionalArguments: "--scan ./ --disableYarnAudit --disableNodeAudit --nvdApiKey ${NVD_KEY}", odcInstallation: 'DP-Check'
+                }
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
@@ -328,431 +241,360 @@ pipeline{
                 sh "trivy fs . > trivyfs.txt"
             }
         }
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){   
-                       sh "docker build --build-arg TMDB_V3_API_KEY=<yourapikey> -t netflix ."
-                       sh "docker tag netflix nasi101/netflix:latest "
-                       sh "docker push nasi101/netflix:latest "
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh "docker build --build-arg TMDB_V3_API_KEY=<your-api-key> -t netflix ."
+                        sh "docker tag netflix <your-dockerhub-username>/netflix:latest"
+                        sh "docker push <your-dockerhub-username>/netflix:latest"
                     }
                 }
             }
         }
-        stage("TRIVY"){
-            steps{
-                sh "trivy image nasi101/netflix:latest > trivyimage.txt" 
+        stage('TRIVY') {
+            steps {
+                sh "trivy image <your-dockerhub-username>/netflix:latest > trivyimage.txt"
             }
         }
-        stage('Deploy to container'){
-            steps{
-                sh 'docker run -d --name netflix -p 8081:80 nasi101/netflix:latest'
+        stage('Deploy to container') {
+            steps {
+                sh 'docker stop netflix || true'
+                sh 'docker rm netflix || true'
+                sh 'docker run -d --name netflix -p 8081:80 <your-dockerhub-username>/netflix:latest'
             }
         }
     }
 }
-
-
-If you get docker login failed errorr
-
-sudo su
-sudo usermod -aG docker jenkins
-sudo systemctl restart jenkins
-
-
 ```
 
-**Phase 4: Monitoring**
-
-1. **Install Prometheus and Grafana:**
-
-   Set up Prometheus and Grafana to monitor your application.
-
-   **Installing Prometheus:**
-
-   First, create a dedicated Linux user for Prometheus and download Prometheus:
-
-   ```bash
-   sudo useradd --system --no-create-home --shell /bin/false prometheus
-   wget https://github.com/prometheus/prometheus/releases/download/v2.47.1/prometheus-2.47.1.linux-amd64.tar.gz
-   ```
-
-   Extract Prometheus files, move them, and create directories:
-
-   ```bash
-   tar -xvf prometheus-2.47.1.linux-amd64.tar.gz
-   cd prometheus-2.47.1.linux-amd64/
-   sudo mkdir -p /data /etc/prometheus
-   sudo mv prometheus promtool /usr/local/bin/
-   sudo mv consoles/ console_libraries/ /etc/prometheus/
-   sudo mv prometheus.yml /etc/prometheus/prometheus.yml
-   ```
-
-   Set ownership for directories:
-
-   ```bash
-   sudo chown -R prometheus:prometheus /etc/prometheus/ /data/
-   ```
-
-   Create a systemd unit configuration file for Prometheus:
-
-   ```bash
-   sudo nano /etc/systemd/system/prometheus.service
-   ```
-
-   Add the following content to the `prometheus.service` file:
-
-   ```plaintext
-   [Unit]
-   Description=Prometheus
-   Wants=network-online.target
-   After=network-online.target
-
-   StartLimitIntervalSec=500
-   StartLimitBurst=5
-
-   [Service]
-   User=prometheus
-   Group=prometheus
-   Type=simple
-   Restart=on-failure
-   RestartSec=5s
-   ExecStart=/usr/local/bin/prometheus \
-     --config.file=/etc/prometheus/prometheus.yml \
-     --storage.tsdb.path=/data \
-     --web.console.templates=/etc/prometheus/consoles \
-     --web.console.libraries=/etc/prometheus/console_libraries \
-     --web.listen-address=0.0.0.0:9090 \
-     --web.enable-lifecycle
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   Here's a brief explanation of the key parts in this `prometheus.service` file:
-
-   - `User` and `Group` specify the Linux user and group under which Prometheus will run.
-
-   - `ExecStart` is where you specify the Prometheus binary path, the location of the configuration file (`prometheus.yml`), the storage directory, and other settings.
-
-   - `web.listen-address` configures Prometheus to listen on all network interfaces on port 9090.
-
-   - `web.enable-lifecycle` allows for management of Prometheus through API calls.
-
-   Enable and start Prometheus:
-
-   ```bash
-   sudo systemctl enable prometheus
-   sudo systemctl start prometheus
-   ```
-
-   Verify Prometheus's status:
-
-   ```bash
-   sudo systemctl status prometheus
-   ```
-
-   You can access Prometheus in a web browser using your server's IP and port 9090:
-
-   `http://<your-server-ip>:9090`
-
-   **Installing Node Exporter:**
-
-   Create a system user for Node Exporter and download Node Exporter:
-
-   ```bash
-   sudo useradd --system --no-create-home --shell /bin/false node_exporter
-   wget https://github.com/prometheus/node_exporter/releases/download/v1.6.1/node_exporter-1.6.1.linux-amd64.tar.gz
-   ```
-
-   Extract Node Exporter files, move the binary, and clean up:
-
-   ```bash
-   tar -xvf node_exporter-1.6.1.linux-amd64.tar.gz
-   sudo mv node_exporter-1.6.1.linux-amd64/node_exporter /usr/local/bin/
-   rm -rf node_exporter*
-   ```
-
-   Create a systemd unit configuration file for Node Exporter:
-
-   ```bash
-   sudo nano /etc/systemd/system/node_exporter.service
-   ```
-
-   Add the following content to the `node_exporter.service` file:
-
-   ```plaintext
-   [Unit]
-   Description=Node Exporter
-   Wants=network-online.target
-   After=network-online.target
-
-   StartLimitIntervalSec=500
-   StartLimitBurst=5
-
-   [Service]
-   User=node_exporter
-   Group=node_exporter
-   Type=simple
-   Restart=on-failure
-   RestartSec=5s
-   ExecStart=/usr/local/bin/node_exporter --collector.logind
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   Replace `--collector.logind` with any additional flags as needed.
-
-   Enable and start Node Exporter:
-
-   ```bash
-   sudo systemctl enable node_exporter
-   sudo systemctl start node_exporter
-   ```
-
-   Verify the Node Exporter's status:
-
-   ```bash
-   sudo systemctl status node_exporter
-   ```
-
-   You can access Node Exporter metrics in Prometheus.
-
-2. **Configure Prometheus Plugin Integration:**
-
-   Integrate Jenkins with Prometheus to monitor the CI/CD pipeline.
-
-   **Prometheus Configuration:**
-
-   To configure Prometheus to scrape metrics from Node Exporter and Jenkins, you need to modify the `prometheus.yml` file. Here is an example `prometheus.yml` configuration for your setup:
-
-   ```yaml
-   global:
-     scrape_interval: 15s
-
-   scrape_configs:
-     - job_name: 'node_exporter'
-       static_configs:
-         - targets: ['localhost:9100']
-
-     - job_name: 'jenkins'
-       metrics_path: '/prometheus'
-       static_configs:
-         - targets: ['<your-jenkins-ip>:<your-jenkins-port>']
-   ```
-
-   Make sure to replace `<your-jenkins-ip>` and `<your-jenkins-port>` with the appropriate values for your Jenkins setup.
-
-   Check the validity of the configuration file:
-
-   ```bash
-   promtool check config /etc/prometheus/prometheus.yml
-   ```
-
-   Reload the Prometheus configuration without restarting:
-
-   ```bash
-   curl -X POST http://localhost:9090/-/reload
-   ```
-
-   You can access Prometheus targets at:
-
-   `http://<your-prometheus-ip>:9090/targets`
-
-
-####Grafana
-
-**Install Grafana on Ubuntu 22.04 and Set it up to Work with Prometheus**
-
-**Step 1: Install Dependencies:**
-
-First, ensure that all necessary dependencies are installed:
+### Troubleshooting notes
+- **`Sensor TypeScript analysis` error, `node: error while loading shared libraries: libatomic.so.1`**: install `libatomic1` on the host (see Phase 2). Doesn't fail the build, but silently skips coverage.
+- **`docker login failed`** even with correct credentials: check the Jenkins user is in the `docker` group.
+  ```bash
+  sudo usermod -aG docker jenkins
+  sudo systemctl restart jenkins
+  ```
+- **Quality gate stuck on `PENDING` indefinitely**: no webhook configured, or webhook URL points at `localhost` from inside a container's own network namespace rather than the host. Use the host's private IP.
+- **`waitForQualityGate` resolves but push still fails later**: these are independent failure points — a passing/failing quality gate does not block the pipeline (`abortPipeline: false`), so don't assume a later failure is related to SonarQube.
+- **Pushing to someone else's Docker Hub namespace** (e.g. copying `nasi101/netflix` verbatim from the original tutorial) will always fail — replace with your own Docker Hub username throughout.
+- **First OWASP scan appears "stuck"**: check for `[INFO] Completed processing batch X/Y` log lines — if progressing, it's downloading the NVD database, not frozen. Don't cancel.
+
+---
+
+## Phase 4: Monitoring — Prometheus, Node Exporter, Grafana
+
+> **Infrastructure note**: this entire phase runs on a **separate, dedicated EC2 instance** (`Monitoring`) — not on the Jenkins box. This mirrors a real production pattern: isolating observability infrastructure from the systems it watches, so a Jenkins-side failure or resource spike doesn't take monitoring down with it. Concretely, Prometheus on the `Monitoring` instance reaches *across the network* to scrape the Jenkins instance's metrics endpoint remotely — it doesn't just monitor itself.
+
+### Original approach
+Install Prometheus and Node Exporter as systemd services with pinned 2023-era release versions; install Grafana via `apt-key add`.
+
+### What changed
+1. Pinned Prometheus/Node Exporter release versions from the tutorial are stale — pull whatever's current instead.
+2. Grafana's install also uses the deprecated `apt-key add` pattern — same fix as Trivy.
+3. The Jenkins Prometheus scrape target needs the **Prometheus metrics plugin** installed in Jenkins itself, or `/prometheus` returns nothing even with a syntactically correct scrape config.
+4. Because Prometheus lives on a different instance than Jenkins, the `jenkins` scrape job's target must be the **Jenkins instance's IP**, not `localhost` — an easy mistake if working from muscle memory of a single-instance setup.
+
+### Commands
+
+**Prometheus:**
 
 ```bash
+sudo useradd --system --no-create-home --shell /bin/false prometheus
+
+# Get the current release dynamically rather than pinning a stale version
+curl -s https://api.github.com/repos/prometheus/prometheus/releases/latest \
+  | grep browser_download_url | grep linux-amd64 | cut -d '"' -f 4 | wget -qi -
+
+tar -xvf prometheus-*.linux-amd64.tar.gz
+cd prometheus-*.linux-amd64/
+sudo mkdir -p /data /etc/prometheus
+sudo mv prometheus promtool /usr/local/bin/
+sudo mv consoles/ console_libraries/ /etc/prometheus/
+sudo mv prometheus.yml /etc/prometheus/prometheus.yml
+sudo chown -R prometheus:prometheus /etc/prometheus/ /data/
+```
+
+`/etc/systemd/system/prometheus.service`:
+
+```ini
+[Unit]
+Description=Prometheus
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+Restart=on-failure
+RestartSec=5s
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/data \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries \
+  --web.listen-address=0.0.0.0:9090 \
+  --web.enable-lifecycle
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable prometheus
+sudo systemctl start prometheus
+# Access: http://<public-ip>:9090
+```
+
+**Node Exporter:**
+
+```bash
+sudo useradd --system --no-create-home --shell /bin/false node_exporter
+
+curl -s https://api.github.com/repos/prometheus/node_exporter/releases/latest \
+  | grep browser_download_url | grep linux-amd64 | cut -d '"' -f 4 | wget -qi -
+
+tar -xvf node_exporter-*.linux-amd64.tar.gz
+sudo mv node_exporter-*.linux-amd64/node_exporter /usr/local/bin/
+rm -rf node_exporter*
+```
+
+`/etc/systemd/system/node_exporter.service`:
+
+```ini
+[Unit]
+Description=Node Exporter
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+Restart=on-failure
+RestartSec=5s
+ExecStart=/usr/local/bin/node_exporter --collector.logind
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable node_exporter
+sudo systemctl start node_exporter
+```
+
+**`/etc/prometheus/prometheus.yml` scrape config:**
+
+```yaml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+
+  - job_name: 'jenkins'
+    metrics_path: '/prometheus'
+    static_configs:
+      - targets: ['<jenkins-ip>:8080']   # no http://, no trailing characters
+```
+
+```bash
+promtool check config /etc/prometheus/prometheus.yml
+sudo systemctl restart prometheus
+```
+
+**Grafana (updated key method):**
+
+```bash
+sudo apt-get install -y apt-transport-https software-properties-common wget
+sudo mkdir -p /etc/apt/keyrings/
+wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
 sudo apt-get update
-sudo apt-get install -y apt-transport-https software-properties-common
+sudo apt-get install -y grafana
+sudo systemctl enable --now grafana-server
+# Access: http://<public-ip>:3000  (admin/admin, forces password change)
 ```
 
-**Step 2: Add the GPG Key:**
+Add Prometheus as a data source (`http://localhost:9090`), import a dashboard (e.g. dashboard ID 1860 for Node Exporter Full).
 
-Add the GPG key for Grafana:
+### Troubleshooting notes
+- **Jenkins scrape target parse error**: `invalid port ":8080>" after host` — usually a stray character (often `>`) left over from copy-pasting a placeholder. Target should be exactly `ip:port`, no scheme prefix, no trailing characters.
+- **`node_exporter` target times out (`context deadline exceeded`)**: security group is missing an inbound rule for port 9100 — this is a *silent* failure (no response, not a rejection), which is the signature of a firewall block rather than a service-down error.
+- **Security group rules need re-adding after cluster/instance recreation**: any newly created resource (fresh EKS nodegroup, fresh EC2) gets its own default security group — an open port on one instance/nodegroup doesn't carry over.
+
+---
+
+## Phase 5: Notifications
+
+Email notifications via Jenkins's Email Extension plugin (installed alongside the other plugins in Phase 3), configured with Gmail SMTP:
+
+- SMTP server: `smtp.gmail.com`
+- Port: `465` (SSL) or `587` (TLS)
+- Requires a Gmail **App Password** (not your regular account password) — Google no longer allows plain-password SMTP auth for third-party apps
+- Add an `emailext(...)` step inside a `post { always { ... } }` block in the Jenkinsfile
+
+---
+
+## Phase 6: Kubernetes — EKS, ArgoCD, and Cross-VPC Networking
+
+### Original approach
+Create an EKS cluster with `eksctl`, install the Prometheus Node Exporter via Helm, deploy the application with ArgoCD pointed at the GitHub repo, and add a Prometheus scrape job for the Kubernetes node using a placeholder `node1Ip:9100`.
+
+### What changed, and why
+
+1. **`eksctl create cluster` creates its own VPC by default.** Unless explicitly told to use an existing VPC, `eksctl` provisions a brand-new VPC for the cluster — completely separate from whatever VPC your Jenkins/monitoring EC2 lives in. This means:
+   - The EKS cluster's private node IPs (typically `192.168.x.x` from eksctl's default CIDR) are **not routable** from an EC2 instance in AWS's default VPC (typically `172.31.x.x`).
+   - Any attempt to scrape a K8s node's internal IP from a Prometheus instance outside that VPC will time out indefinitely — this is not a security group issue, and no amount of security group editing fixes it.
+   - **Fix options**: (a) set up VPC peering between the two VPCs and update route tables — the "correct" production approach; or (b) simpler for a learning/demo project — scrape the node's **public/external IP** instead, since that routes over the internet rather than through VPC-private networking, provided the relevant security group allows it.
+
+2. **The placeholder `node1Ip` in the tutorial is not a template variable** — it's literal text meant to be replaced, easy to miss and copy verbatim, which produces a DNS resolution failure rather than an obviously "wrong IP" error.
+
+3. **Node exporter isn't automatically present on EKS worker nodes** just because it's running on the Jenkins EC2 — it must be separately installed into the cluster via Helm as a DaemonSet.
+
+4. **ArgoCD's `waitForQualityGate`-style stuck states** (an in-progress sync operation blocking a new manual sync) are resolved via `argocd app terminate-op <app>`, not by guessing at a JSON patch against the Application CRD.
+
+### Commands
 
 ```bash
-wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+# Install tooling (once) on the Jenkins EC2 — this instance acts as your kubectl/eksctl control point
+# AWS CLI v2, kubectl, eksctl, helm — install per current official docs for your OS
+
+aws sts get-caller-identity   # confirm IAM credentials are configured
+
+eksctl create cluster \
+  --name netflix \
+  --region us-east-1 \
+  --version 1.36 \
+  --nodegroup-name workers \
+  --node-type t3.medium \
+  --nodes 2 \
+  --managed
+
+kubectl get nodes
+kubectl get pods -A
 ```
 
-**Step 3: Add Grafana Repository:**
-
-Add the repository for Grafana stable releases:
+**ArgoCD install:**
 
 ```bash
-echo "deb https://packages.grafana.com/oss/deb stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl get pods -n argocd -w
+
+kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+kubectl get svc argocd-server -n argocd   # note the EXTERNAL-IP
+
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 ```
 
-**Step 4: Update and Install Grafana:**
-
-Update the package list and install Grafana:
+**ArgoCD CLI:**
 
 ```bash
-sudo apt-get update
-sudo apt-get -y install grafana
+curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+rm argocd-linux-amd64
+argocd login <argocd-external-ip>:443 --username admin --password <password> --insecure
 ```
 
-**Step 5: Enable and Start Grafana Service:**
-
-To automatically start Grafana after a reboot, enable the service:
+**In-cluster Node Exporter via Helm:**
 
 ```bash
-sudo systemctl enable grafana-server
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+kubectl create namespace prometheus-node-exporter
+helm install prometheus-node-exporter prometheus-community/prometheus-node-exporter --namespace prometheus-node-exporter
+kubectl get pods -n prometheus-node-exporter -o wide
 ```
 
-Then, start Grafana:
+**ArgoCD Application** (created via UI or CLI):
+- Repo URL: your fork's URL
+- Path: `Kubernetes`
+- Cluster: `https://kubernetes.default.svc`
+- Sync policy: Automatic
 
-```bash
-sudo systemctl start grafana-server
-```
+**Prometheus scrape job for K8s nodes** (using the node's *external* IP, given the cross-VPC constraint above):
 
-**Step 6: Check Grafana Status:**
-
-Verify the status of the Grafana service to ensure it's running correctly:
-
-```bash
-sudo systemctl status grafana-server
-```
-
-**Step 7: Access Grafana Web Interface:**
-
-Open a web browser and navigate to Grafana using your server's IP address. The default port for Grafana is 3000. For example:
-
-`http://<your-server-ip>:3000`
-
-You'll be prompted to log in to Grafana. The default username is "admin," and the default password is also "admin."
-
-**Step 8: Change the Default Password:**
-
-When you log in for the first time, Grafana will prompt you to change the default password for security reasons. Follow the prompts to set a new password.
-
-**Step 9: Add Prometheus Data Source:**
-
-To visualize metrics, you need to add a data source. Follow these steps:
-
-- Click on the gear icon (⚙️) in the left sidebar to open the "Configuration" menu.
-
-- Select "Data Sources."
-
-- Click on the "Add data source" button.
-
-- Choose "Prometheus" as the data source type.
-
-- In the "HTTP" section:
-  - Set the "URL" to `http://localhost:9090` (assuming Prometheus is running on the same server).
-  - Click the "Save & Test" button to ensure the data source is working.
-
-**Step 10: Import a Dashboard:**
-
-To make it easier to view metrics, you can import a pre-configured dashboard. Follow these steps:
-
-- Click on the "+" (plus) icon in the left sidebar to open the "Create" menu.
-
-- Select "Dashboard."
-
-- Click on the "Import" dashboard option.
-
-- Enter the dashboard code you want to import (e.g., code 1860).
-
-- Click the "Load" button.
-
-- Select the data source you added (Prometheus) from the dropdown.
-
-- Click on the "Import" button.
-
-You should now have a Grafana dashboard set up to visualize metrics from Prometheus.
-
-Grafana is a powerful tool for creating visualizations and dashboards, and you can further customize it to suit your specific monitoring needs.
-
-That's it! You've successfully installed and set up Grafana to work with Prometheus for monitoring and visualization.
-
-2. **Configure Prometheus Plugin Integration:**
-    - Integrate Jenkins with Prometheus to monitor the CI/CD pipeline.
-
-
-**Phase 5: Notification**
-
-1. **Implement Notification Services:**
-    - Set up email notifications in Jenkins or other notification mechanisms.
-
-# Phase 6: Kubernetes
-
-## Create Kubernetes Cluster with Nodegroups
-
-In this phase, you'll set up a Kubernetes cluster with node groups. This will provide a scalable environment to deploy and manage your applications.
-
-## Monitor Kubernetes with Prometheus
-
-Prometheus is a powerful monitoring and alerting toolkit, and you'll use it to monitor your Kubernetes cluster. Additionally, you'll install the node exporter using Helm to collect metrics from your cluster nodes.
-
-### Install Node Exporter using Helm
-
-To begin monitoring your Kubernetes cluster, you'll install the Prometheus Node Exporter. This component allows you to collect system-level metrics from your cluster nodes. Here are the steps to install the Node Exporter using Helm:
-
-1. Add the Prometheus Community Helm repository:
-
-    ```bash
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    ```
-
-2. Create a Kubernetes namespace for the Node Exporter:
-
-    ```bash
-    kubectl create namespace prometheus-node-exporter
-    ```
-
-3. Install the Node Exporter using Helm:
-
-    ```bash
-    helm install prometheus-node-exporter prometheus-community/prometheus-node-exporter --namespace prometheus-node-exporter
-    ```
-
-Add a Job to Scrape Metrics on nodeip:9001/metrics in prometheus.yml:
-
-Update your Prometheus configuration (prometheus.yml) to add a new job for scraping metrics from nodeip:9001/metrics. You can do this by adding the following configuration to your prometheus.yml file:
-
-
-```
-  - job_name: 'Netflix'
+```yaml
+  - job_name: 'K8s'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['node1Ip:9100']
+      - targets: ['<node-external-ip>:9100']
 ```
 
-Replace 'your-job-name' with a descriptive name for your job. The static_configs section specifies the targets to scrape metrics from, and in this case, it's set to nodeip:9001.
+```bash
+kubectl get nodes -o wide   # get current EXTERNAL-IP — changes on every cluster recreation
+```
 
-Don't forget to reload or restart Prometheus to apply these changes to your configuration.
+Open port 9100 inbound on the EKS nodegroup's security group (a *different* security group than your Jenkins EC2's — created fresh by `eksctl` each time the cluster is (re)created):
+- Type: Custom TCP, Port: 9100, Source: `0.0.0.0/0`
 
-To deploy an application with ArgoCD, you can follow these steps, which I'll outline in Markdown format:
+### Troubleshooting notes
+- **`Unable to sync: another operation is already in progress`**: an automatic retry is already running.
+  ```bash
+  argocd app terminate-op netflix
+  argocd app sync netflix
+  ```
+- **`kubectl patch ... path: /operation` fails with "server rejected our request"**: don't hand-write JSON patches against ArgoCD's Application CRD — use `argocd app terminate-op` instead.
+- **ArgoCD sync stuck retrying: `namespaces "prometheus-node-exporter" not found`**: create the namespace manually, then resync.
+  ```bash
+  kubectl create namespace prometheus-node-exporter
+  ```
+- **K8s Prometheus target: `context deadline exceeded` even with the security group open and node exporter confirmed `Running`**: check whether your Jenkins EC2 and the EKS cluster are in the **same VPC**. Different default CIDR ranges (`172.31.x.x` vs `192.168.x.x`) are a strong tell that they aren't — confirm via each resource's VPC ID in the AWS console. If they differ, private IPs are unreachable regardless of security group configuration; use the node's public IP instead, or set up VPC peering.
+- **Node IPs and security groups change every time the cluster is recreated**: `eksctl delete cluster` followed by `eksctl create cluster` produces new nodes, new IPs, and a new auto-generated security group. The Prometheus K8s job target and the corresponding security group rule both need to be redone after every recreation — this isn't a bug, it's the expected cost of tearing the cluster down between sessions to save on EKS/EC2 billing.
 
-### Deploy Application with ArgoCD
+---
 
-1. **Install ArgoCD:**
+## Full Redeployment Checklist (after tearing down the cluster)
 
-   You can install ArgoCD on your Kubernetes cluster by following the instructions provided in the [EKS Workshop](https://archive.eksworkshop.com/intermediate/290_argocd/install/) documentation.
+Useful for repeated demos/presentations, since EKS clusters are deleted between sessions to control cost. Steps are split by which instance they run on — this matters, since Jenkins/Docker/SonarQube and Prometheus/Grafana live on **two separate EC2 instances**.
 
-2. **Set Your GitHub Repository as a Source:**
+**On the `netflix-jenkins` instance** (also acts as the `kubectl`/`eksctl`/`helm` control point — never SSH into the EKS worker nodes directly):
 
-   After installing ArgoCD, you need to set up your GitHub repository as a source for your application deployment. This typically involves configuring the connection to your repository and defining the source for your ArgoCD application. The specific steps will depend on your setup and requirements.
+1. Start the instance if stopped — Elastic IP means the address doesn't change
+2. `sudo systemctl start docker && docker start sonar && sudo systemctl start jenkins`
+3. `eksctl create cluster ...` (15–20 min)
+4. `kubectl get nodes` / `kubectl get pods -A` to confirm health
+5. Reinstall ArgoCD, re-expose via LoadBalancer, retrieve new admin password
+6. Re-create `prometheus-node-exporter` namespace, reinstall via Helm
+7. Recreate the ArgoCD Application (via ArgoCD's web UI)
+8. `kubectl get nodes -o wide` — note the new node's **external IP**, needed on the Monitoring instance next
 
-3. **Create an ArgoCD Application:**
-   - `name`: Set the name for your application.
-   - `destination`: Define the destination where your application should be deployed.
-   - `project`: Specify the project the application belongs to.
-   - `source`: Set the source of your application, including the GitHub repository URL, revision, and the path to the application within the repository.
-   - `syncPolicy`: Configure the sync policy, including automatic syncing, pruning, and self-healing.
+**On the `Monitoring` instance** (separate SSH session, separate box):
 
-4. **Access your Application**
-   - To Access the app make sure port 30007 is open in your security group and then open a new tab paste your NodeIP:30007, your app should be running.
+9. Start the instance if stopped, then `sudo systemctl start prometheus grafana-server node_exporter`
+10. Update the Prometheus `K8s` job's target with the new node's external IP from step 8; run `promtool check config` then `sudo systemctl restart prometheus`
 
-**Phase 7: Cleanup**
+**In the browser / AWS Console:**
 
-1. **Cleanup AWS EC2 Instances:**
-    - Terminate AWS EC2 instances that are no longer needed.# test push Tuesday 04 August 2026 02:49:57 PM IST
+11. Re-open port 9100 on the new EKS nodegroup's security group (a fresh one is created every time the cluster is recreated)
+12. Confirm all Prometheus targets show `UP` at `http://<monitoring-ip>:9090/targets`
+
+**On your local machine (the actual demo):**
+
+13. Push a small commit to trigger the pipeline live, and show ArgoCD/`kubectl` reflecting the synced result — this demonstrates the full CI/CD → GitOps loop, not just a static deployment
+
+---
+
+## Lessons Learned — Version Drift
+
+This project's real value isn't just "deployed a Netflix clone with Jenkins" — it's the process of taking a tutorial that assumed a specific 2023 snapshot of the software ecosystem and making it work against 2026 reality. Nearly every phase hit some form of drift:
+
+- **Security tightened industry-wide**: NVD now gates its CVE feed behind an API key; Docker Hub no longer accepts plain passwords for CLI auth; GPG signing moved away from `apt-key`.
+- **Runtime EOL cascades**: Node 16's end-of-life didn't just mean "an old version" — it meant downstream packages actively started refusing to install on it, forcing an actual code change (the Dockerfile base image) rather than a config tweak.
+- **Version requirements ratchet upward silently**: Jenkins LTS quietly moved its minimum supported Java version from 11 to 17, then effectively to 17/21, with no single obvious announcement — this only surfaces as a confusing crash-on-start.
+- **Infrastructure assumptions don't transfer**: the tutorial's monitoring step assumes flat, single-VPC networking; provisioning a cluster with `eksctl` on its own defaults silently creates a second, unroutable network, invisible until a scrape target times out.
+
+None of these issues are "wrong" tutorials — they're the natural consequence of writing infrastructure instructions in a fast-moving ecosystem. Diagnosing *why* a previously-correct command now fails, distinguishing a config issue from a genuine architectural gap (like the VPC mismatch), and choosing a pragmatic fix over a perfect one (external IP vs. full VPC peering) is the actual skill this project ended up exercising — arguably more representative of real DevOps work than a clean first-try run-through would have been.
